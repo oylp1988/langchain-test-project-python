@@ -7,32 +7,34 @@ from langchain_community.tools.tavily_search import TavilySearchResults
 from langgraph.prebuilt import create_react_agent
 from dotenv import load_dotenv
 import json
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import ToolMessage, HumanMessage
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import ToolNode, tools_condition
 
-class BasicToolNode:
-    """A node that runs the tools requested in the last AIMessage."""
+# class BasicToolNode:
+#     """A node that runs the tools requested in the last AIMessage."""
 
-    def __init__(self, tools: list) -> None:
-        self.tools_by_name = {tool.name: tool for tool in tools}
+#     def __init__(self, tools: list) -> None:
+#         self.tools_by_name = {tool.name: tool for tool in tools}
 
-    def __call__(self, inputs: dict):
-        if messages := inputs.get("messages", []):
-            message = messages[-1]
-        else:
-            raise ValueError("No message found in input")
-        outputs = []
-        for tool_call in message.tool_calls:
-            tool_result = self.tools_by_name[tool_call["name"]].invoke(
-                tool_call["args"]
-            )
-            outputs.append(
-                ToolMessage(
-                    content=json.dumps(tool_result),
-                    name=tool_call["name"],
-                    tool_call_id=tool_call["id"],
-                )
-            )
-        return {"messages": outputs}
+#     def __call__(self, inputs: dict):
+#         if messages := inputs.get("messages", []):
+#             message = messages[-1]
+#         else:
+#             raise ValueError("No message found in input")
+#         outputs = []
+#         for tool_call in message.tool_calls:
+#             tool_result = self.tools_by_name[tool_call["name"]].invoke(
+#                 tool_call["args"]
+#             )
+#             outputs.append(
+#                 ToolMessage(
+#                     content=json.dumps(tool_result),
+#                     name=tool_call["name"],
+#                     tool_call_id=tool_call["id"],
+#                 )
+#             )
+#         return {"messages": outputs}
 
 load_dotenv()
 class State(TypedDict):
@@ -43,25 +45,28 @@ class State(TypedDict):
 
 
 graph_builder = StateGraph(State)
+config = {"configurable": {"thread_id": "1"}}
 llm = ChatOllama(
-    model="mistral",
+    model="llama3.2",
     temperature=0,
     # other params...
 )
+memory = MemorySaver()
 search = TavilySearchResults(max_results=2)
 tools = [search]
-# llm_with_tools = create_react_agent(llm, tools)
 # Unlike create_react_agent, bind_tools does return a processed message, it will return the tool call content.
 # Some tool calling and the result process are wrapped in the create_react_agent function.
 llm_with_tools = llm.bind_tools(tools)
+# llm_with_tools = create_react_agent(llm, tools)
+
 
 def chatbot(state: State):
-    return {"messages": [llm_with_tools.invoke(state["messages"])]}
+   return {"messages": [llm_with_tools.invoke(state["messages"])]}
 
 def stream_graph_updates(user_input: str):
-    for event in graph.stream({"messages": [{"role": "user", "content": user_input}]}):
+    for event in graph.stream({"messages": [{"role": "user", "content": user_input}]}, config, stream_mode="values"):
         for value in event.values():
-            print("Assistant:", value["messages"][-1].content)
+            event["messages"][-1].pretty_print()
 
 def route_tools(
     state: State,
@@ -81,19 +86,19 @@ def route_tools(
     return END
 
 
-tool_node = BasicToolNode(tools=tools)
+tool_node = ToolNode(tools=tools)
 graph_builder.add_conditional_edges(
     "chatbot",
-    route_tools,
+    tools_condition,
     {"tools": "tools", END: END},
 )
 
 graph_builder.add_node("tools", tool_node)
 graph_builder.add_node("chatbot", chatbot)
-graph_builder.add_edge("tools", "chatbot")
 graph_builder.add_edge(START, "chatbot")
+graph_builder.add_edge("tools", "chatbot")
 graph_builder.add_edge("chatbot", END)
-graph = graph_builder.compile()
+graph = graph_builder.compile(checkpointer=memory)
 
 while True:
     try:
