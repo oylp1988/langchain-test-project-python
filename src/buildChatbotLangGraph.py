@@ -10,6 +10,8 @@ import json
 from langchain_core.messages import ToolMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.types import Command, interrupt
+from langchain_core.tools import tool
 
 # class BasicToolNode:
 #     """A node that runs the tools requested in the last AIMessage."""
@@ -43,6 +45,11 @@ class State(TypedDict):
     # (in this case, it appends messages to the list, rather than overwriting them)
     messages: Annotated[list, add_messages]
 
+@tool
+def human_assistance(query: str) -> str:
+    """Request assistance from a human."""
+    human_response = interrupt({"query": query})
+    return human_response["data"]
 
 graph_builder = StateGraph(State)
 config = {"configurable": {"thread_id": "1"}}
@@ -53,7 +60,7 @@ llm = ChatOllama(
 )
 memory = MemorySaver()
 search = TavilySearchResults(max_results=2)
-tools = [search]
+tools = [search,human_assistance]
 # Unlike create_react_agent, bind_tools does return a processed message, it will return the tool call content.
 # Some tool calling and the result process are wrapped in the create_react_agent function.
 llm_with_tools = llm.bind_tools(tools)
@@ -61,11 +68,24 @@ llm_with_tools = llm.bind_tools(tools)
 
 
 def chatbot(state: State):
-   return {"messages": [llm_with_tools.invoke(state["messages"])]}
+   message =  llm_with_tools.invoke(state["messages"])
+   assert len(message.tool_calls) <= 1
+   return {"messages": [message]}
 
 def stream_graph_updates(user_input: str):
     for event in graph.stream({"messages": [{"role": "user", "content": user_input}]}, config, stream_mode="values"):
-        for value in event.values():
+            event["messages"][-1].pretty_print()
+            print("-----******-----")
+    
+    human_response = (
+    "We, the experts are here to help! We'd recommend you check out LangGraph to build your agent."
+    " It's much more reliable and extensible than simple autonomous agents."
+    )
+
+    human_command = Command(resume={"data": human_response})
+    events = graph.stream(human_command, config, stream_mode="values")
+    for event in events:
+        if "messages" in event:
             event["messages"][-1].pretty_print()
 
 def route_tools(
